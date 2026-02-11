@@ -336,7 +336,7 @@ def create_train_state(
         optax.adamw(learning_rate=schedule_fn, weight_decay=weight_decay),
     )
     
-    optimizer = nnx.Optimizer(model, tx)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
     return optimizer, tx
 
 
@@ -368,7 +368,7 @@ def train_step(
             guidance=guidance,
         )
     
-    loss, grads = nnx.value_and_grad(loss_fn)(model)
+    loss, grads = nnx.value_and_grad(loss_fn, wrt=nnx.Param)(model)
     optimizer.update(grads)
     return loss
 
