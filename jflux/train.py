@@ -357,15 +357,18 @@ def create_train_state(
     gradient_clip: float,
 ) -> tuple[nnx.Optimizer, optax.GradientTransformation]:
     """Create optimizer and learning rate schedule."""
+    # Ensure decay_steps is at least 1
+    decay_steps = max(1, total_steps - warmup_steps)
+    
     # Learning rate schedule: linear warmup then cosine decay
     warmup_fn = optax.linear_schedule(
         init_value=0.0,
         end_value=learning_rate,
-        transition_steps=warmup_steps,
+        transition_steps=max(1, warmup_steps),
     )
     decay_fn = optax.cosine_decay_schedule(
         init_value=learning_rate,
-        decay_steps=total_steps - warmup_steps,
+        decay_steps=decay_steps,
     )
     schedule_fn = optax.join_schedules(
         schedules=[warmup_fn, decay_fn],
@@ -525,6 +528,11 @@ def train(
     
     # Calculate total steps
     steps_per_epoch = len(dataloader)
+    if steps_per_epoch == 0:
+        raise ValueError(
+            f"Dataloader has no batches! Check that num_samples ({num_samples}) >= batch_size ({batch_size}) "
+            f"and that images were successfully downloaded."
+        )
     total_steps = steps_per_epoch * num_epochs
     print(f"Steps per epoch: {steps_per_epoch}")
     print(f"Total steps: {total_steps}")
@@ -562,11 +570,14 @@ def train(
     
     # Create optimizer
     print("\n[3/4] Setting up optimizer...")
+    # Ensure warmup_steps doesn't exceed total_steps
+    effective_warmup = min(warmup_steps, total_steps // 10) if total_steps > 0 else 0
+    print(f"  Warmup steps: {effective_warmup} (of {total_steps} total)")
     optimizer, _ = create_train_state(
         model=model,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
-        warmup_steps=warmup_steps,
+        warmup_steps=effective_warmup,
         total_steps=total_steps,
         gradient_clip=gradient_clip,
     )
