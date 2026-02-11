@@ -188,10 +188,14 @@ class DiffusionDBDataLoader:
             # Load images and metadata from extracted directory
             if extract_dir.exists():
                 json_path = extract_dir / f"{part_name}.json"
+                print(f"    Looking for JSON at: {json_path}")
+                print(f"    Directory contents: {list(extract_dir.iterdir())[:5]}")
                 if json_path.exists():
                     with open(json_path, "r") as f:
                         metadata = json.load(f)
                     
+                    print(f"    Found {len(metadata)} images in metadata")
+                    loaded_from_part = 0
                     for img_name, meta in metadata.items():
                         # Check NSFW scores
                         if filter_nsfw and img_name in nsfw_scores:
@@ -208,12 +212,20 @@ class DiffusionDBDataLoader:
                                     "prompt": meta["p"],  # "p" is the prompt key
                                 })
                                 img.close()
+                                loaded_from_part += 1
                             except Exception as e:
                                 pass  # Skip failed images
                         
                         # Stop if we have enough samples
                         if len(self.samples) >= num_samples:
                             break
+                    
+                    print(f"    Loaded {loaded_from_part} images from {part_name}")
+                else:
+                    print(f"    WARNING: JSON file not found!")
+                    # List what's actually in the directory
+                    for item in extract_dir.iterdir():
+                        print(f"      - {item.name}")
                 
                 if len(self.samples) >= num_samples:
                     break
