@@ -127,12 +127,47 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
+# Model scale configurations for training from scratch
+# These reduce model size for memory-constrained environments
+MODEL_SCALES = {
+    "tiny": {
+        "depth": 2,
+        "depth_single_blocks": 4,
+        "hidden_size": 384,
+        "num_heads": 6,
+        "description": "~50M params, requires ~2GB GPU memory",
+    },
+    "small": {
+        "depth": 4,
+        "depth_single_blocks": 8,
+        "hidden_size": 768,
+        "num_heads": 12,
+        "description": "~400M params, requires ~8GB GPU memory",
+    },
+    "base": {
+        "depth": 8,
+        "depth_single_blocks": 16,
+        "hidden_size": 1536,
+        "num_heads": 24,
+        "description": "~2B params, requires ~24GB GPU memory",
+    },
+    "full": {
+        "depth": 19,
+        "depth_single_blocks": 38,
+        "hidden_size": 3072,
+        "num_heads": 24,
+        "description": "~12B params (original), requires ~96GB GPU memory",
+    },
+}
+
+
 def load_flow_model(
     name: str,
     device: str,
     hf_download: bool = True,
     from_scratch: bool = False,
     context_in_dim: int | None = None,
+    model_scale: str = "full",
 ) -> Flux:
     """Load Flux model.
     
@@ -142,6 +177,8 @@ def load_flow_model(
         hf_download: Whether to download weights from HuggingFace
         from_scratch: If True, initialize with random weights (for training from scratch)
         context_in_dim: Override context_in_dim (T5 output dim) for training from scratch
+        model_scale: Model scale for training from scratch: tiny (~50M), small (~400M), 
+                    base (~2B), or full (~12B). Only used when from_scratch=True.
     """
     from dataclasses import replace
     
@@ -149,8 +186,31 @@ def load_flow_model(
     with jax.default_device(device):
         params = configs[name].params
         
+        # Apply model scale if training from scratch
+        if from_scratch and model_scale != "full":
+            if model_scale not in MODEL_SCALES:
+                raise ValueError(f"Unknown model_scale: {model_scale}. Choose from: {list(MODEL_SCALES.keys())}")
+            
+            scale_config = MODEL_SCALES[model_scale]
+            print(f"  Using '{model_scale}' scale: {scale_config['description']}")
+            params = FluxParams(
+                in_channels=params.in_channels,
+                vec_in_dim=params.vec_in_dim,
+                context_in_dim=context_in_dim if context_in_dim else params.context_in_dim,
+                hidden_size=scale_config["hidden_size"],
+                mlp_ratio=params.mlp_ratio,
+                num_heads=scale_config["num_heads"],
+                depth=scale_config["depth"],
+                depth_single_blocks=scale_config["depth_single_blocks"],
+                axes_dim=params.axes_dim,
+                theta=params.theta,
+                qkv_bias=params.qkv_bias,
+                guidance_embed=params.guidance_embed,
+                rngs=params.rngs,
+                param_dtype=params.param_dtype,
+            )
         # Override context_in_dim if specified (for different T5 sizes)
-        if context_in_dim is not None and from_scratch:
+        elif context_in_dim is not None and from_scratch:
             params = FluxParams(
                 in_channels=params.in_channels,
                 vec_in_dim=params.vec_in_dim,

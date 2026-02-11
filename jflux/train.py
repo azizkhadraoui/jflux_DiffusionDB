@@ -401,7 +401,7 @@ def train_step(
             guidance=guidance,
         )
     
-    loss, grads = nnx.value_and_grad(loss_fn, wrt=nnx.Param)(model)
+    loss, grads = nnx.value_and_grad(loss_fn)(model)
     optimizer.update(grads)
     return loss
 
@@ -438,9 +438,11 @@ def train(
     model_name: str = "flux-dev",
     from_scratch: bool = True,
     t5_size: str = "base",
+    model_scale: str = "small",  # Use smaller model by default for training from scratch
     # Training
     num_epochs: int = 10,
-    batch_size: int = 4,
+    batch_size: int = 1,  # Flux is huge (~12B params), use small batch
+    gradient_accumulation_steps: int = 4,  # Effective batch = batch_size * grad_accum
     learning_rate: float = 1e-4,
     weight_decay: float = 0.01,
     warmup_steps: int = 1000,
@@ -463,8 +465,14 @@ def train(
         model_name: "flux-dev" or "flux-schnell" (config for model architecture)
         from_scratch: If True, train from random init; if False, fine-tune from pretrained
         t5_size: T5 encoder size - "base" (250MB), "large" (800MB), "xl" (3GB), "xxl" (9.5GB)
+        model_scale: Model size when training from scratch:
+            - "tiny" (~50M params, ~2GB GPU) 
+            - "small" (~400M params, ~8GB GPU)
+            - "base" (~2B params, ~24GB GPU)
+            - "full" (~12B params, ~96GB GPU)
         num_epochs: Number of training epochs
-        batch_size: Batch size (reduce for memory)
+        batch_size: Batch size (use 1 for full Flux, may need more for smaller configs)
+        gradient_accumulation_steps: Accumulate gradients over N steps (effective batch = batch_size * N)
         learning_rate: Peak learning rate (higher for from_scratch, e.g. 1e-4)
         weight_decay: AdamW weight decay
         warmup_steps: LR warmup steps
@@ -472,6 +480,10 @@ def train(
         save_every: Save checkpoint every N steps
         output_dir: Checkpoint directory
         seed: Random seed
+        
+    Note:
+        Full Flux model is ~12B parameters and requires ~50GB+ GPU memory even with batch_size=1.
+        For GPUs with less memory, use model_scale="small" (default) or "tiny".
     """
     # Detect device
     devices = jax.devices()
@@ -487,9 +499,11 @@ def train(
     print(f"Number of devices: {len(devices)}")
     print(f"Dataset: DiffusionDB ({num_samples} samples)")
     print(f"Model: {model_name} ({'random init' if from_scratch else 'pretrained'})")
+    if from_scratch:
+        print(f"Model scale: {model_scale}")
     print(f"T5 encoder: {t5_size}")
     print(f"Image size: {image_size}x{image_size}")
-    print(f"Batch size: {batch_size}")
+    print(f"Batch size: {batch_size} (effective: {batch_size * gradient_accumulation_steps})")
     print(f"Learning rate: {learning_rate}")
     print(f"Epochs: {num_epochs}")
     print("=" * 60)
@@ -547,6 +561,7 @@ def train(
         device=jax_device, 
         from_scratch=from_scratch,
         context_in_dim=t5_dim if from_scratch else None,
+        model_scale=model_scale if from_scratch else "full",
     )
     
     # Pre-compute image IDs (same for all batches with same size)
