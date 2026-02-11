@@ -178,12 +178,19 @@ class DiffusionDBDataLoader:
                 print(f"  Extracting {part_name}.zip...")
                 try:
                     with zipfile.ZipFile(zip_path, 'r') as zf:
+                        # List contents first
+                        names = zf.namelist()[:5]
+                        print(f"    ZIP contents (first 5): {names}")
                         zf.extractall(images_dir)
                     # Remove ZIP after extraction to save space
                     zip_path.unlink()
                 except Exception as e:
                     print(f"    Warning: Failed to extract {part_name}: {e}")
                     continue
+            
+            # Debug: List what's in images_dir
+            print(f"    images_dir contents: {list(images_dir.iterdir())[:5]}")
+            print(f"    extract_dir exists? {extract_dir.exists()}")
             
             # Load images and metadata from extracted directory
             if extract_dir.exists():
