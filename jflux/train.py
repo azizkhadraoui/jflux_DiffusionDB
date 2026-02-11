@@ -146,11 +146,16 @@ class DiffusionDBDataLoader:
             ]
             print(f"    After NSFW filtering: {len(metadata_df)} images")
         
-        # Shuffle and select subset
+        # Select samples from consecutive parts to minimize downloads
+        # Sort by part_id to group by ZIP file
+        metadata_df = metadata_df.sort_values("part_id")
+        
+        # Take first N samples (from earliest parts)
+        metadata_df = metadata_df.head(num_samples)
+        
+        # Then shuffle locally (for training randomization)
         if shuffle:
-            metadata_df = metadata_df.sample(n=min(num_samples, len(metadata_df)), random_state=seed)
-        else:
-            metadata_df = metadata_df.head(num_samples)
+            metadata_df = metadata_df.sample(frac=1, random_state=seed)
         
         # Get unique part_ids we need to download
         part_ids = metadata_df["part_id"].unique()
