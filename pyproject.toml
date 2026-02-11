@@ -23,11 +23,17 @@ tpu = [
   "einops"
 ]
 train = [
+  "chex>=0.1.8",
   "datasets>=2.14.0",
+  "einops>=0.7.0",
+  "numpy>=1.24.0",
   "optax>=0.1.7",
-  "tqdm>=4.65.0",
-  "pillow>=9.0.0",
   "orbax-checkpoint>=0.4.0",
+  "pillow>=9.0.0",
+  "tqdm>=4.65.0",
+  "torch",
+  "transformers",
+  "sentencepiece",
 ]
 
 [project.scripts]
