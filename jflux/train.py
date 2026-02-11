@@ -79,10 +79,6 @@ class DiffusionDBDataLoader:
     This avoids the deprecated dataset loading scripts.
     """
     
-    # Base URL for DiffusionDB images on HuggingFace
-    HF_BASE_URL = "https://huggingface.co/datasets/poloclub/diffusiondb/resolve/main"
-    METADATA_URL = f"{HF_BASE_URL}/metadata.parquet"
-    
     def __init__(
         self,
         num_samples: int = 1000,
@@ -97,98 +93,76 @@ class DiffusionDBDataLoader:
         """
         Initialize DiffusionDB dataloader.
         
+        Uses HuggingFace datasets library to load DiffusionDB with images
+        embedded in parquet files.
+        
         Args:
-            num_samples: Number of samples to use (max 2M for 2M subset)
+            num_samples: Number of samples to use
             batch_size: Batch size for training
             image_size: Target image size (must be multiple of 16)
             shuffle: Whether to shuffle data
             seed: Random seed for reproducibility
-            cache_dir: Directory to cache downloaded images
+            cache_dir: Directory to cache data
             filter_nsfw: Whether to filter NSFW images
             nsfw_threshold: NSFW score threshold (0-1, images above filtered)
         """
-        import pandas as pd
-        from pathlib import Path
-        from urllib.request import urlretrieve
+        from datasets import load_dataset
         
         self.batch_size = batch_size
         self.image_size = image_size
         self.shuffle = shuffle
         self.rng = np.random.default_rng(seed)
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Download metadata if not cached
-        metadata_path = self.cache_dir / "metadata.parquet"
-        if not metadata_path.exists():
-            print(f"Downloading DiffusionDB metadata ({self.METADATA_URL})...")
-            urlretrieve(self.METADATA_URL, metadata_path)
-            print("  Download complete!")
+        # Load dataset using HuggingFace datasets 
+        # Use 2m_random_1k subset for quick testing, or 2m_first_1k for consistency
+        print(f"Loading DiffusionDB dataset from HuggingFace...")
         
-        # Load metadata
-        print("Loading metadata...")
-        self.metadata_df = pd.read_parquet(metadata_path)
-        print(f"  Total samples in metadata: {len(self.metadata_df)}")
+        # Determine which subset to use based on num_samples
+        if num_samples <= 1000:
+            subset = "2m_random_1k"
+        elif num_samples <= 10000:
+            subset = "2m_random_10k"  
+        elif num_samples <= 100000:
+            subset = "2m_random_100k"
+        else:
+            subset = "2m_random_1m"
+        
+        print(f"  Using subset: {subset}")
+        
+        # Load with trust_remote_code for custom loading scripts
+        dataset = load_dataset(
+            "poloclub/diffusiondb",
+            subset,
+            split="train",
+            trust_remote_code=True,
+            cache_dir=cache_dir,
+        )
+        
+        print(f"  Total samples in subset: {len(dataset)}")
         
         # Filter NSFW if requested
         if filter_nsfw:
-            original_len = len(self.metadata_df)
-            self.metadata_df = self.metadata_df[
-                (self.metadata_df["image_nsfw"] < nsfw_threshold) & 
-                (self.metadata_df["prompt_nsfw"] < nsfw_threshold)
-            ]
-            print(f"  After NSFW filtering (threshold={nsfw_threshold}): {len(self.metadata_df)} samples")
+            original_len = len(dataset)
+            dataset = dataset.filter(
+                lambda x: x["image_nsfw"] < nsfw_threshold and x["prompt_nsfw"] < nsfw_threshold
+            )
+            print(f"  After NSFW filtering (threshold={nsfw_threshold}): {len(dataset)} samples")
         
-        # Sample subset
-        if num_samples < len(self.metadata_df):
+        # Limit to num_samples
+        if num_samples < len(dataset):
             if shuffle:
-                self.metadata_df = self.metadata_df.sample(n=num_samples, random_state=seed)
+                dataset = dataset.shuffle(seed=seed).select(range(num_samples))
             else:
-                self.metadata_df = self.metadata_df.head(num_samples)
+                dataset = dataset.select(range(num_samples))
         
-        # Convert to list of dicts for iteration
-        self.samples = self.metadata_df.to_dict('records')
-        print(f"  Using {len(self.samples)} samples")
+        self.dataset = dataset
+        print(f"  Using {len(self.dataset)} samples")
         
-    def _get_image_url(self, part_id: int, image_name: str) -> str:
-        """Construct the URL for an image."""
-        part_str = f"part-{part_id:06d}"
-        return f"{self.HF_BASE_URL}/images/{part_str}/{image_name}"
-    
-    def _download_image(self, part_id: int, image_name: str) -> Image.Image | None:
-        """Download an image from HuggingFace."""
-        import requests
-        from io import BytesIO
-        
-        # Check cache first
-        cache_path = self.cache_dir / "images" / f"{part_id:06d}" / image_name
-        if cache_path.exists():
-            try:
-                return Image.open(cache_path)
-            except Exception:
-                pass  # Re-download if corrupted
-        
-        # Download
-        url = self._get_image_url(part_id, image_name)
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            img = Image.open(BytesIO(response.content))
-            
-            # Cache the image
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(cache_path)
-            
-            return img
-        except Exception as e:
-            print(f"  Warning: Failed to download {image_name}: {e}")
-            return None
-    
     def __len__(self) -> int:
-        return len(self.samples) // self.batch_size
+        return len(self.dataset) // self.batch_size
     
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        indices = np.arange(len(self.samples))
+        indices = np.arange(len(self.dataset))
         if self.shuffle:
             self.rng.shuffle(indices)
         
@@ -199,8 +173,8 @@ class DiffusionDBDataLoader:
             prompts = []
             
             for idx in batch_indices:
-                sample = self.samples[idx]
-                img = self._download_image(sample["part_id"], sample["image_name"])
+                sample = self.dataset[int(idx)]
+                img = sample["image"]  # PIL Image from dataset
                 
                 if img is not None:
                     try:
@@ -215,10 +189,6 @@ class DiffusionDBDataLoader:
                     "images": np.stack(images, axis=0),
                     "prompts": prompts,
                 }
-                # Load from HF dataset
-                batch = self.dataset.select(batch_indices.tolist())
-                for item in batch:
-                    img = item[self.image_col]
 
 
 def create_img_ids(height: int, width: int, batch_size: int) -> Array:
