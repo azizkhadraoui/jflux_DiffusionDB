@@ -96,8 +96,8 @@ class DiffusionDBDataLoader:
         """
         Initialize DiffusionDB dataloader.
         
-        Downloads ZIP files from HuggingFace containing images and metadata.
-        Each ZIP contains 1000 images with a JSON metadata file.
+        Downloads ZIP files from HuggingFace containing images.
+        Prompts come from metadata.parquet.
         
         Args:
             num_samples: Number of samples to use
@@ -109,7 +109,6 @@ class DiffusionDBDataLoader:
             filter_nsfw: Whether to filter NSFW images (uses metadata.parquet)
             nsfw_threshold: NSFW score threshold (0-1, images above filtered)
         """
-        import json
         import zipfile
         import pandas as pd
         import requests
@@ -123,39 +122,47 @@ class DiffusionDBDataLoader:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Calculate how many zip parts we need (1000 images per zip)
-        num_parts = (num_samples + 999) // 1000
-        num_parts = min(num_parts, 2000)  # Max 2000 parts in DiffusionDB 2M
-        
         print(f"Loading DiffusionDB dataset...")
         print(f"  Requested samples: {num_samples}")
-        print(f"  Will download {num_parts} ZIP file(s) (~{num_parts * 800}MB)")
         
-        # Download NSFW metadata for filtering
-        nsfw_scores = {}
+        # Download metadata.parquet (contains prompts and NSFW scores)
+        metadata_path = self.cache_dir / "metadata.parquet"
+        if not metadata_path.exists():
+            print(f"  Downloading metadata.parquet...")
+            metadata_url = "https://huggingface.co/datasets/poloclub/diffusiondb/resolve/main/metadata.parquet"
+            urlretrieve(metadata_url, metadata_path)
+        
+        # Load metadata
+        print(f"  Loading metadata...")
+        metadata_df = pd.read_parquet(metadata_path)
+        print(f"    Total images in metadata: {len(metadata_df)}")
+        
+        # Filter NSFW if requested
         if filter_nsfw:
-            metadata_path = self.cache_dir / "metadata.parquet"
-            if not metadata_path.exists():
-                print(f"  Downloading metadata.parquet for NSFW filtering...")
-                metadata_url = "https://huggingface.co/datasets/poloclub/diffusiondb/resolve/main/metadata.parquet"
-                urlretrieve(metadata_url, metadata_path)
-            
-            print(f"  Loading NSFW scores from metadata...")
-            metadata_df = pd.read_parquet(
-                metadata_path, 
-                columns=["image_name", "image_nsfw", "prompt_nsfw"]
-            )
-            for _, row in metadata_df.iterrows():
-                nsfw_scores[row["image_name"]] = (row["image_nsfw"], row["prompt_nsfw"])
-            del metadata_df
+            original_len = len(metadata_df)
+            metadata_df = metadata_df[
+                (metadata_df["image_nsfw"] < nsfw_threshold) & 
+                (metadata_df["prompt_nsfw"] < nsfw_threshold)
+            ]
+            print(f"    After NSFW filtering: {len(metadata_df)} images")
         
-        # Download and extract ZIP files
-        self.samples = []
+        # Shuffle and select subset
+        if shuffle:
+            metadata_df = metadata_df.sample(n=min(num_samples, len(metadata_df)), random_state=seed)
+        else:
+            metadata_df = metadata_df.head(num_samples)
+        
+        # Get unique part_ids we need to download
+        part_ids = metadata_df["part_id"].unique()
+        print(f"  Need to download {len(part_ids)} ZIP file(s) for {len(metadata_df)} samples")
+        
+        # Create images directory
         images_dir = self.cache_dir / "images"
         images_dir.mkdir(exist_ok=True)
         
-        for part_num in range(1, num_parts + 1):
-            part_name = f"part-{part_num:06d}"
+        # Download and extract needed ZIP files
+        for part_id in sorted(part_ids):
+            part_name = f"part-{part_id:06d}"
             zip_path = self.cache_dir / f"{part_name}.zip"
             extract_dir = images_dir / part_name
             
@@ -173,81 +180,38 @@ class DiffusionDBDataLoader:
                     print(f"    Warning: Failed to download {part_name}: {e}")
                     continue
             
-            # Extract ZIP if not already extracted
+            # Extract ZIP to part-specific directory
             if zip_path.exists() and not extract_dir.exists():
                 print(f"  Extracting {part_name}.zip...")
                 try:
+                    extract_dir.mkdir(exist_ok=True)
                     with zipfile.ZipFile(zip_path, 'r') as zf:
-                        # List contents first
-                        names = zf.namelist()[:5]
-                        print(f"    ZIP contents (first 5): {names}")
-                        zf.extractall(images_dir)
+                        zf.extractall(extract_dir)
                     # Remove ZIP after extraction to save space
                     zip_path.unlink()
                 except Exception as e:
                     print(f"    Warning: Failed to extract {part_name}: {e}")
                     continue
+        
+        # Load images using metadata
+        print(f"  Loading images...")
+        self.samples = []
+        for _, row in tqdm(metadata_df.iterrows(), total=len(metadata_df), desc="  Loading"):
+            part_name = f"part-{row['part_id']:06d}"
+            img_path = images_dir / part_name / row["image_name"]
             
-            # Debug: List what's in images_dir
-            print(f"    images_dir contents: {list(images_dir.iterdir())[:5]}")
-            print(f"    extract_dir exists? {extract_dir.exists()}")
-            
-            # Load images and metadata from extracted directory
-            if extract_dir.exists():
-                json_path = extract_dir / f"{part_name}.json"
-                print(f"    Looking for JSON at: {json_path}")
-                print(f"    Directory contents: {list(extract_dir.iterdir())[:5]}")
-                if json_path.exists():
-                    with open(json_path, "r") as f:
-                        metadata = json.load(f)
-                    
-                    print(f"    Found {len(metadata)} images in metadata")
-                    loaded_from_part = 0
-                    for img_name, meta in metadata.items():
-                        # Check NSFW scores
-                        if filter_nsfw and img_name in nsfw_scores:
-                            img_nsfw, prompt_nsfw = nsfw_scores[img_name]
-                            if img_nsfw >= nsfw_threshold or prompt_nsfw >= nsfw_threshold:
-                                continue
-                        
-                        img_path = extract_dir / img_name
-                        if img_path.exists():
-                            try:
-                                img = Image.open(img_path)
-                                self.samples.append({
-                                    "image": img.copy(),  # Copy to allow closing file
-                                    "prompt": meta["p"],  # "p" is the prompt key
-                                })
-                                img.close()
-                                loaded_from_part += 1
-                            except Exception as e:
-                                pass  # Skip failed images
-                        
-                        # Stop if we have enough samples
-                        if len(self.samples) >= num_samples:
-                            break
-                    
-                    print(f"    Loaded {loaded_from_part} images from {part_name}")
-                else:
-                    print(f"    WARNING: JSON file not found!")
-                    # List what's actually in the directory
-                    for item in extract_dir.iterdir():
-                        print(f"      - {item.name}")
-                
-                if len(self.samples) >= num_samples:
-                    break
+            if img_path.exists():
+                try:
+                    img = Image.open(img_path)
+                    self.samples.append({
+                        "image": img.copy(),
+                        "prompt": row["prompt"],
+                    })
+                    img.close()
+                except Exception as e:
+                    pass  # Skip failed images
         
         print(f"  Loaded {len(self.samples)} samples")
-        
-        # Shuffle samples if requested
-        if shuffle:
-            indices = list(range(len(self.samples)))
-            self.rng.shuffle(indices)
-            self.samples = [self.samples[i] for i in indices]
-        
-        # Limit to requested num_samples
-        self.samples = self.samples[:num_samples]
-        print(f"  Using {len(self.samples)} samples")
         
     def __len__(self) -> int:
         return len(self.samples) // self.batch_size
