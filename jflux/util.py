@@ -127,9 +127,53 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
-def load_flow_model(name: str, device: str, hf_download: bool = True) -> Flux:
+def load_flow_model(
+    name: str,
+    device: str,
+    hf_download: bool = True,
+    from_scratch: bool = False,
+    context_in_dim: int | None = None,
+) -> Flux:
+    """Load Flux model.
+    
+    Args:
+        name: Model config name (flux-dev or flux-schnell)
+        device: Device to load on (gpu, tpu, cpu)
+        hf_download: Whether to download weights from HuggingFace
+        from_scratch: If True, initialize with random weights (for training from scratch)
+        context_in_dim: Override context_in_dim (T5 output dim) for training from scratch
+    """
+    from dataclasses import replace
+    
     device = jax.devices(device)[0]
     with jax.default_device(device):
+        params = configs[name].params
+        
+        # Override context_in_dim if specified (for different T5 sizes)
+        if context_in_dim is not None and from_scratch:
+            params = FluxParams(
+                in_channels=params.in_channels,
+                vec_in_dim=params.vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=params.hidden_size,
+                mlp_ratio=params.mlp_ratio,
+                num_heads=params.num_heads,
+                depth=params.depth,
+                depth_single_blocks=params.depth_single_blocks,
+                axes_dim=params.axes_dim,
+                theta=params.theta,
+                qkv_bias=params.qkv_bias,
+                guidance_embed=params.guidance_embed,
+                rngs=params.rngs,
+                param_dtype=params.param_dtype,
+            )
+            print(f"  Using custom context_in_dim={context_in_dim} for T5 encoder")
+        
+        if from_scratch:
+            print(f"Initializing Flux with random weights on {device}")
+            model = Flux(params=params)
+            return model
+        
         ckpt_path = configs[name].ckpt_path
         if (
             ckpt_path is None
@@ -141,7 +185,7 @@ def load_flow_model(name: str, device: str, hf_download: bool = True) -> Flux:
 
         print(f"Load and port flux on {device}")
 
-        model = Flux(params=configs[name].params)
+        model = Flux(params=params)
         if ckpt_path is not None:
             tensors = {}
             with safe_open(ckpt_path, framework="pt") as f:
@@ -155,10 +199,41 @@ def load_flow_model(name: str, device: str, hf_download: bool = True) -> Flux:
     return model
 
 
-def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
-    # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
+# T5 model options (smaller = less disk space, faster, but lower quality)
+T5_MODELS = {
+    "xxl": {"name": "ariG23498/t5-v1_1-xxl-torch", "dim": 4096},  # 9.5GB - best quality
+    "xl": {"name": "google/t5-v1_1-xl", "dim": 2048},              # 3GB
+    "large": {"name": "google/t5-v1_1-large", "dim": 1024},        # 800MB
+    "base": {"name": "google/t5-v1_1-base", "dim": 768},           # 250MB - fastest
+}
+
+
+def get_t5_dim(model_size: str) -> int:
+    """Get the output dimension for a T5 model size."""
+    if model_size not in T5_MODELS:
+        raise ValueError(f"Unknown T5 size: {model_size}. Choose from {list(T5_MODELS.keys())}")
+    return T5_MODELS[model_size]["dim"]
+
+
+def load_t5(
+    device: str | torch.device = "cuda",
+    max_length: int = 512,
+    model_size: str = "xxl",
+) -> HFEmbedder:
+    """Load T5 text encoder.
+    
+    Args:
+        device: Device to load on
+        max_length: Max sequence length (64, 128, 256, 512)
+        model_size: T5 model size - "xxl" (9.5GB), "xl" (3GB), "large" (800MB), "base" (250MB)
+    """
+    if model_size not in T5_MODELS:
+        raise ValueError(f"Unknown T5 size: {model_size}. Choose from {list(T5_MODELS.keys())}")
+    
+    model_name = T5_MODELS[model_size]["name"]
+    print(f"  Loading T5 model: {model_name}")
     return HFEmbedder(
-        "ariG23498/t5-v1_1-xxl-torch", max_length=max_length, torch_dtype=torch.bfloat16
+        model_name, max_length=max_length, torch_dtype=torch.bfloat16
     ).to(device)
 
 
