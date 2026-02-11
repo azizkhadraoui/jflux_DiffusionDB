@@ -48,6 +48,9 @@ jflux-train = "jflux.train:app"
 [tool.uv]
 package = true
 
+[tool.setuptools.packages.find]
+include = ["jflux*"]
+
 [dependency-groups]
 dev = [
     "flux",
