@@ -402,7 +402,7 @@ def train_step(
         )
     
     loss, grads = nnx.value_and_grad(loss_fn)(model)
-    optimizer.update(grads)
+    optimizer.update(model, grads)  # Flax 0.11.0 requires (model, grads)
     return loss
 
 
