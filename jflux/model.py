@@ -81,7 +81,12 @@ class Flux(nnx.Module):
             param_dtype=params.param_dtype,
         )
         self.guidance_in = (
-            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
+            MLPEmbedder(
+                in_dim=256,
+                hidden_dim=self.hidden_size,
+                rngs=params.rngs,
+                param_dtype=params.param_dtype,
+            )
             if params.guidance_embed
             else Identity()
         )
