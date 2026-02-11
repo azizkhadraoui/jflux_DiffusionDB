@@ -92,6 +92,21 @@ def preprocess_image(
     return arr
 
 
+# Mapping from subset names to number of samples
+DIFFUSIONDB_SUBSETS = {
+    "2m_first_1k": 1000,
+    "2m_first_5k": 5000,
+    "2m_first_10k": 10000,
+    "2m_first_50k": 50000,
+    "2m_first_100k": 100000,
+    "2m_random_1k": 1000,
+    "2m_random_5k": 5000,
+    "2m_random_10k": 10000,
+    "2m_random_50k": 50000,
+    "2m_random_100k": 100000,
+}
+
+
 class DiffusionDBDataLoader:
     """DataLoader for DiffusionDB dataset from Hugging Face."""
     
@@ -114,7 +129,6 @@ class DiffusionDBDataLoader:
                 - "2m_first_50k": First 50K images
                 - "2m_first_100k": First 100K images
                 - "2m_random_1k" to "2m_random_100k": Random subsets
-                - "large_random_1k" to "large_random_100k": High-res subsets
         """
         self.batch_size = batch_size
         self.image_size = image_size
@@ -122,12 +136,40 @@ class DiffusionDBDataLoader:
         self.rng = np.random.default_rng(seed)
         
         print(f"Loading DiffusionDB subset: {subset}")
-        self.dataset = load_dataset(
-            "poloclub/diffusiondb",
-            subset,
-            split="train",
-            trust_remote_code=True,
-        )
+        
+        # Get number of samples for this subset
+        num_samples = DIFFUSIONDB_SUBSETS.get(subset, 1000)
+        
+        # Load from parquet files (new format)
+        # DiffusionDB stores data in numbered parquet parts
+        try:
+            # Try loading as standard dataset first (works for converted datasets)
+            self.dataset = load_dataset(
+                "poloclub/diffusiondb",
+                "2m_random_1k",  # Use the parquet-based config
+                split="train",
+            )
+            # Limit to requested subset size
+            if len(self.dataset) > num_samples:
+                indices = list(range(num_samples))
+                self.dataset = self.dataset.select(indices)
+        except Exception as e:
+            print(f"Standard loading failed: {e}")
+            print("Trying alternative loading method...")
+            # Alternative: load from parquet files directly
+            self.dataset = load_dataset(
+                "parquet",
+                data_files=f"hf://datasets/poloclub/diffusiondb/*/part-*.parquet",
+                split="train",
+            )
+            # Limit to requested subset size
+            if len(self.dataset) > num_samples:
+                if self.shuffle:
+                    indices = self.rng.choice(len(self.dataset), num_samples, replace=False).tolist()
+                else:
+                    indices = list(range(num_samples))
+                self.dataset = self.dataset.select(indices)
+        
         print(f"Loaded {len(self.dataset)} samples")
         
     def __len__(self) -> int:
@@ -374,9 +416,17 @@ def train(
         freeze_text_encoders: Keep T5/CLIP frozen (recommended)
         freeze_vae: Keep VAE frozen (recommended)
     """
+    # Detect device
+    devices = jax.devices()
+    device_info = devices[0]
+    device_type = device_info.platform.upper()
+    device_name = getattr(device_info, 'device_kind', device_type)
+    
     print("=" * 60)
     print("Flux Training Script")
     print("=" * 60)
+    print(f"Device: {device_name} ({device_type})")
+    print(f"Number of devices: {len(devices)}")
     print(f"Dataset: DiffusionDB ({subset})")
     print(f"Model: {model_name}")
     print(f"Image size: {image_size}x{image_size}")
@@ -410,23 +460,20 @@ def train(
     
     # Load models
     print("\n[2/4] Loading models...")
-    try:
-        jax.devices("gpu")
-        device = "gpu"
-        torch_device = "cuda"
-    except RuntimeError:
-        device = "cpu"
-        torch_device = "cpu"
+    # Use the detected device type
+    jax_device = device_type.lower()  # "gpu", "tpu", or "cpu"
+    torch_device = "cuda" if jax_device == "gpu" else "cpu"
     
-    print(f"  Using device: {device}")
+    print(f"  JAX device: {jax_device}")
+    print(f"  PyTorch device: {torch_device}")
     print("  Loading T5 encoder...")
     t5 = load_t5(device=torch_device, max_length=512)
     print("  Loading CLIP encoder...")
     clip = load_clip(device=torch_device)
     print("  Loading VAE...")
-    ae = load_ae(model_name, device=device)
+    ae = load_ae(model_name, device=jax_device)
     print("  Loading Flux model...")
-    model = load_flow_model(model_name, device=device)
+    model = load_flow_model(model_name, device=jax_device)
     
     # Pre-compute image IDs (same for all batches with same size)
     img_ids = create_img_ids(

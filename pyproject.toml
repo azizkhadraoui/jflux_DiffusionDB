@@ -26,14 +26,16 @@ train = [
   "chex>=0.1.8",
   "datasets>=2.14.0",
   "einops>=0.7.0",
+  "huggingface_hub>=0.20.0",
   "numpy>=1.24.0",
   "optax>=0.1.7",
   "orbax-checkpoint>=0.4.0",
   "pillow>=9.0.0",
-  "tqdm>=4.65.0",
-  "torch",
-  "transformers",
+  "safetensors>=0.4.0",
   "sentencepiece",
+  "torch",
+  "tqdm>=4.65.0",
+  "transformers",
 ]
 
 [project.scripts]
@@ -42,7 +44,9 @@ jflux-train = "jflux.train:app"
 
 [tool.uv]
 package = true
-dev-dependencies = [
+
+[dependency-groups]
+dev = [
     "flux",
     "pytest>=8.3.3",
 ]
