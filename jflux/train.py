@@ -79,6 +79,13 @@ class DiffusionDBDataLoader:
     This avoids the deprecated dataset loading scripts.
     """
     
+    # HuggingFace parquet URLs for different subsets
+    SUBSETS = {
+        "1k": "https://huggingface.co/datasets/poloclub/diffusiondb/resolve/main/2m_random_1k/train-00000-of-00001.parquet",
+        "10k": "https://huggingface.co/datasets/poloclub/diffusiondb/resolve/main/2m_random_10k/train-00000-of-00001.parquet",
+        "100k": "https://huggingface.co/datasets/poloclub/diffusiondb/resolve/main/2m_random_100k/train-00000-of-00001.parquet",
+    }
+    
     def __init__(
         self,
         num_samples: int = 1000,
@@ -86,15 +93,14 @@ class DiffusionDBDataLoader:
         image_size: int = 256,
         shuffle: bool = True,
         seed: int = 42,
-        cache_dir: str = "./diffusiondb_cache",
+        cache_dir: str = "/mnt/diffusiondb_cache",
         filter_nsfw: bool = True,
         nsfw_threshold: float = 0.5,
     ):
         """
         Initialize DiffusionDB dataloader.
         
-        Uses HuggingFace datasets library to load DiffusionDB with images
-        embedded in parquet files.
+        Downloads parquet files directly from HuggingFace and extracts images.
         
         Args:
             num_samples: Number of samples to use
@@ -106,63 +112,90 @@ class DiffusionDBDataLoader:
             filter_nsfw: Whether to filter NSFW images
             nsfw_threshold: NSFW score threshold (0-1, images above filtered)
         """
-        from datasets import load_dataset
+        import pandas as pd
+        from pathlib import Path
+        from io import BytesIO
         
         self.batch_size = batch_size
         self.image_size = image_size
         self.shuffle = shuffle
         self.rng = np.random.default_rng(seed)
-        
-        # Load dataset using HuggingFace datasets 
-        # Use 2m_random_1k subset for quick testing, or 2m_first_1k for consistency
-        print(f"Loading DiffusionDB dataset from HuggingFace...")
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Determine which subset to use based on num_samples
         if num_samples <= 1000:
-            subset = "2m_random_1k"
+            subset_key = "1k"
         elif num_samples <= 10000:
-            subset = "2m_random_10k"  
-        elif num_samples <= 100000:
-            subset = "2m_random_100k"
+            subset_key = "10k"
         else:
-            subset = "2m_random_1m"
+            subset_key = "100k"
         
-        print(f"  Using subset: {subset}")
+        print(f"Loading DiffusionDB dataset (subset: {subset_key})...")
         
-        # Load with trust_remote_code for custom loading scripts
-        dataset = load_dataset(
-            "poloclub/diffusiondb",
-            subset,
-            split="train",
-            trust_remote_code=True,
-            cache_dir=cache_dir,
-        )
+        # Download parquet if not cached
+        parquet_path = self.cache_dir / f"diffusiondb_{subset_key}.parquet"
+        if not parquet_path.exists():
+            import requests
+            print(f"  Downloading parquet file...")
+            url = self.SUBSETS[subset_key]
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
+            with open(parquet_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"  Downloaded to {parquet_path}")
         
-        print(f"  Total samples in subset: {len(dataset)}")
+        # Load parquet
+        print(f"  Loading parquet file...")
+        df = pd.read_parquet(parquet_path)
+        print(f"  Total samples: {len(df)}")
         
         # Filter NSFW if requested
-        if filter_nsfw:
-            original_len = len(dataset)
-            dataset = dataset.filter(
-                lambda x: x["image_nsfw"] < nsfw_threshold and x["prompt_nsfw"] < nsfw_threshold
-            )
-            print(f"  After NSFW filtering (threshold={nsfw_threshold}): {len(dataset)} samples")
+        if filter_nsfw and "image_nsfw" in df.columns:
+            original_len = len(df)
+            df = df[
+                (df["image_nsfw"] < nsfw_threshold) & 
+                (df["prompt_nsfw"] < nsfw_threshold)
+            ]
+            print(f"  After NSFW filtering (threshold={nsfw_threshold}): {len(df)} samples")
         
         # Limit to num_samples
-        if num_samples < len(dataset):
+        if num_samples < len(df):
             if shuffle:
-                dataset = dataset.shuffle(seed=seed).select(range(num_samples))
+                df = df.sample(n=num_samples, random_state=seed)
             else:
-                dataset = dataset.select(range(num_samples))
+                df = df.head(num_samples)
         
-        self.dataset = dataset
-        print(f"  Using {len(self.dataset)} samples")
+        # Convert image bytes to PIL Images
+        print(f"  Processing {len(df)} images...")
+        self.samples = []
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="  Loading images"):
+            try:
+                # Image is stored as dict with 'bytes' key in parquet
+                img_data = row["image"]
+                if isinstance(img_data, dict) and "bytes" in img_data:
+                    img_bytes = img_data["bytes"]
+                elif isinstance(img_data, bytes):
+                    img_bytes = img_data
+                else:
+                    continue
+                    
+                img = Image.open(BytesIO(img_bytes))
+                self.samples.append({
+                    "image": img,
+                    "prompt": row["prompt"],
+                })
+            except Exception as e:
+                print(f"    Warning: Failed to load image: {e}")
+        
+        print(f"  Using {len(self.samples)} samples")
         
     def __len__(self) -> int:
-        return len(self.dataset) // self.batch_size
+        return len(self.samples) // self.batch_size
     
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        indices = np.arange(len(self.dataset))
+        indices = np.arange(len(self.samples))
         if self.shuffle:
             self.rng.shuffle(indices)
         
@@ -173,8 +206,8 @@ class DiffusionDBDataLoader:
             prompts = []
             
             for idx in batch_indices:
-                sample = self.dataset[int(idx)]
-                img = sample["image"]  # PIL Image from dataset
+                sample = self.samples[idx]
+                img = sample["image"]
                 
                 if img is not None:
                     try:
