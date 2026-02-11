@@ -129,12 +129,14 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
 
 # Model scale configurations for training from scratch
 # These reduce model size for memory-constrained environments
+# axes_dim must sum to head_dim (hidden_size / num_heads)
 MODEL_SCALES = {
     "tiny": {
         "depth": 2,
         "depth_single_blocks": 4,
         "hidden_size": 384,
         "num_heads": 6,
+        "axes_dim": [16, 24, 24],  # sum=64, head_dim=384/6=64
         "description": "~50M params, requires ~2GB GPU memory",
     },
     "small": {
@@ -142,6 +144,7 @@ MODEL_SCALES = {
         "depth_single_blocks": 8,
         "hidden_size": 768,
         "num_heads": 12,
+        "axes_dim": [16, 24, 24],  # sum=64, head_dim=768/12=64
         "description": "~400M params, requires ~8GB GPU memory",
     },
     "base": {
@@ -149,6 +152,7 @@ MODEL_SCALES = {
         "depth_single_blocks": 16,
         "hidden_size": 1536,
         "num_heads": 24,
+        "axes_dim": [16, 24, 24],  # sum=64, head_dim=1536/24=64
         "description": "~2B params, requires ~24GB GPU memory",
     },
     "full": {
@@ -156,6 +160,7 @@ MODEL_SCALES = {
         "depth_single_blocks": 38,
         "hidden_size": 3072,
         "num_heads": 24,
+        "axes_dim": [16, 56, 56],  # sum=128, head_dim=3072/24=128
         "description": "~12B params (original), requires ~96GB GPU memory",
     },
 }
@@ -202,7 +207,7 @@ def load_flow_model(
                 num_heads=scale_config["num_heads"],
                 depth=scale_config["depth"],
                 depth_single_blocks=scale_config["depth_single_blocks"],
-                axes_dim=params.axes_dim,
+                axes_dim=scale_config["axes_dim"],
                 theta=params.theta,
                 qkv_bias=params.qkv_bias,
                 guidance_embed=params.guidance_embed,
