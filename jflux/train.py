@@ -555,7 +555,7 @@ def inference(
     key = jax.random.PRNGKey(seed)
     
     # Prepare initial noise and conditioning
-    x, img_ids, txt, txt_ids, vec = prepare(
+    inp = prepare(
         t5=t5,
         clip=clip,
         img=get_noise(
@@ -563,10 +563,15 @@ def inference(
             height=height,
             width=width,
             dtype=jnp.bfloat16,
-            seed=key,  # Pass PRNGKey, not integer
+            seed=key,
         ),
         prompt=prompt,
     )
+    x = inp["img"]
+    img_ids = inp["img_ids"]
+    txt = inp["txt"]
+    txt_ids = inp["txt_ids"]
+    vec = inp["vec"]
     
     # Get timestep schedule
     timesteps = get_schedule(
