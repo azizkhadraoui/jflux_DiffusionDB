@@ -631,7 +631,7 @@ def train(
     gradient_clip: float = 1.0,
     # Checkpointing
     save_every: int = 1000,
-    output_dir: str = "./checkpoints",
+    output_dir: str = "/mnt/checkpoints",  # Use /mnt for more space on cloud VMs
     # Logging
     log_every: int = 10,  # Print detailed metrics every N steps
     # Hardware
