@@ -611,7 +611,7 @@ def inference(
 
 def train(
     # Dataset
-    num_samples: int = 1000,
+    num_samples: int = 10000,
     image_size: int = 256,
     cache_dir: str = "./diffusiondb_cache",
     filter_nsfw: bool = True,
@@ -620,9 +620,9 @@ def train(
     model_name: str = "flux-dev",
     from_scratch: bool = True,
     t5_size: str = "base",
-    model_scale: str = "small",  # Use smaller model by default for training from scratch
+    model_scale: str = "base",  # "tiny", "small", "base", or "full"
     # Training
-    num_epochs: int = 10,
+    num_epochs: int = 50,
     batch_size: int = 1,  # Flux is huge (~12B params), use small batch
     gradient_accumulation_steps: int = 4,  # Effective batch = batch_size * grad_accum
     learning_rate: float = 1e-4,
@@ -632,6 +632,8 @@ def train(
     # Checkpointing
     save_every: int = 1000,
     output_dir: str = "./checkpoints",
+    # Logging
+    log_every: int = 10,  # Print detailed metrics every N steps
     # Hardware
     seed: int = 42,
 ):
@@ -661,6 +663,7 @@ def train(
         gradient_clip: Max gradient norm
         save_every: Save checkpoint every N steps
         output_dir: Checkpoint directory
+        log_every: Print detailed metrics every N steps
         seed: Random seed
         
     Note:
@@ -772,9 +775,16 @@ def train(
     global_step = 0
     use_guidance = model_name == "flux-dev"
     
+    # Metrics tracking
+    import time
+    all_losses = []  # Track all losses for statistics
+    training_start_time = time.time()
+    
     for epoch in range(num_epochs):
         epoch_loss = 0.0
+        epoch_losses = []  # Track losses within epoch for variance
         num_batches = 0
+        epoch_start_time = time.time()
         
         progress = tqdm(
             dataloader,
@@ -836,27 +846,87 @@ def train(
                 guidance=guidance,
             )
             
-            epoch_loss += float(loss)
+            loss_val = float(loss)
+            epoch_loss += loss_val
+            epoch_losses.append(loss_val)
+            all_losses.append(loss_val)
             num_batches += 1
             global_step += 1
             
-            # Update progress bar
+            # Update progress bar with basic metrics
             progress.set_postfix({
-                "loss": f"{float(loss):.4f}",
-                "avg_loss": f"{epoch_loss / num_batches:.4f}",
+                "loss": f"{loss_val:.4f}",
+                "avg": f"{epoch_loss / num_batches:.4f}",
             })
+            
+            # Print detailed metrics every log_every steps
+            if global_step % log_every == 0:
+                elapsed = time.time() - training_start_time
+                steps_per_sec = global_step / elapsed
+                samples_per_sec = steps_per_sec * batch_size
+                eta_seconds = (total_steps - global_step) / steps_per_sec if steps_per_sec > 0 else 0
+                eta_hours = eta_seconds / 3600
+                
+                # Compute loss statistics
+                recent_losses = all_losses[-100:] if len(all_losses) >= 100 else all_losses
+                loss_mean = np.mean(recent_losses)
+                loss_std = np.std(recent_losses)
+                loss_min = min(recent_losses)
+                loss_max = max(recent_losses)
+                
+                print(f"\n  [Step {global_step}/{total_steps}] "
+                      f"Loss: {loss_val:.4f} | "
+                      f"Avg(100): {loss_mean:.4f} +/- {loss_std:.4f} | "
+                      f"Min/Max: {loss_min:.4f}/{loss_max:.4f}")
+                print(f"    Speed: {steps_per_sec:.2f} steps/s, {samples_per_sec:.2f} samples/s | "
+                      f"ETA: {eta_hours:.1f}h | "
+                      f"Elapsed: {elapsed/3600:.1f}h")
             
             # Save checkpoint
             if global_step % save_every == 0:
                 save_checkpoint(model, optimizer, global_step, output_dir)
         
-        # End of epoch summary
+        # End of epoch summary with detailed metrics
+        epoch_time = time.time() - epoch_start_time
         avg_loss = epoch_loss / num_batches
-        print(f"\nEpoch {epoch + 1} completed. Average loss: {avg_loss:.4f}")
+        loss_std = np.std(epoch_losses) if len(epoch_losses) > 1 else 0.0
+        
+        print(f"\n{'='*60}")
+        print(f"Epoch {epoch + 1}/{num_epochs} completed in {epoch_time/60:.1f} min")
+        print(f"  Loss: {avg_loss:.4f} +/- {loss_std:.4f}")
+        print(f"  Min/Max loss: {min(epoch_losses):.4f} / {max(epoch_losses):.4f}")
+        print(f"  Batches: {num_batches}, Steps: {global_step}/{total_steps}")
+        
+        # Overall progress
+        total_elapsed = time.time() - training_start_time
+        overall_avg_loss = np.mean(all_losses)
+        print(f"  Overall avg loss: {overall_avg_loss:.4f}")
+        print(f"  Total time: {total_elapsed/3600:.2f}h")
+        print(f"{'='*60}")
     
     # Save final checkpoint
     save_checkpoint(model, optimizer, global_step, output_dir)
-    print("\nTraining completed!")
+    
+    # Final training summary
+    total_time = time.time() - training_start_time
+    final_avg_loss = np.mean(all_losses)
+    final_std = np.std(all_losses)
+    first_losses = all_losses[:100] if len(all_losses) >= 100 else all_losses[:len(all_losses)//10+1]
+    last_losses = all_losses[-100:] if len(all_losses) >= 100 else all_losses[-(len(all_losses)//10+1):]
+    
+    print("\n" + "=" * 60)
+    print("TRAINING COMPLETED!")
+    print("=" * 60)
+    print(f"Total steps: {global_step}")
+    print(f"Total time: {total_time/3600:.2f} hours")
+    print(f"Average speed: {global_step / total_time:.2f} steps/s")
+    print(f"\nLoss Statistics:")
+    print(f"  Final avg loss: {final_avg_loss:.4f} +/- {final_std:.4f}")
+    print(f"  First 100 steps avg: {np.mean(first_losses):.4f}")
+    print(f"  Last 100 steps avg: {np.mean(last_losses):.4f}")
+    print(f"  Improvement: {np.mean(first_losses) - np.mean(last_losses):.4f}")
+    print(f"\nCheckpoint saved to: {output_dir}")
+    print("=" * 60)
 
 
 def app():
