@@ -554,10 +554,6 @@ def inference(
     print("\nGenerating image...")
     key = jax.random.PRNGKey(seed)
     
-    # Get text embeddings
-    txt = torch2jax(t5([prompt]))
-    vec = torch2jax(clip([prompt]))
-    
     # Prepare initial noise and conditioning
     x, img_ids, txt, txt_ids, vec = prepare(
         t5=t5,
@@ -567,7 +563,7 @@ def inference(
             height=height,
             width=width,
             dtype=jnp.bfloat16,
-            seed=seed,
+            seed=key,  # Pass PRNGKey, not integer
         ),
         prompt=prompt,
     )
