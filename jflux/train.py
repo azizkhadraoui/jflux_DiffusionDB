@@ -39,7 +39,8 @@ from jflux.model import Flux, FluxParams
 from jflux.modules.autoencoder import AutoEncoder
 from jflux.modules.conditioner import HFEmbedder
 from jflux.modules.layers import timestep_embedding
-from jflux.util import configs, get_t5_dim, load_ae, load_clip, load_flow_model, load_t5, torch2jax
+from jflux.sampling import denoise, get_noise, get_schedule, prepare, unpack
+from jflux.util import configs, get_t5_dim, load_ae, load_clip, load_flow_model, load_t5, torch2jax, MODEL_SCALES
 
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -427,6 +428,186 @@ def save_checkpoint(
     print(f"Saved checkpoint to {path}")
 
 
+def load_checkpoint(
+    checkpoint_path: str,
+    model_name: str = "flux-dev",
+    model_scale: str = "small",
+    t5_size: str = "base",
+    device: str = "gpu",
+) -> Flux:
+    """
+    Load a trained model from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file (e.g. "./checkpoints/checkpoint_1000_model.pkl")
+        model_name: Model config name (flux-dev or flux-schnell)
+        model_scale: Model scale used during training (tiny, small, base, full)
+        t5_size: T5 encoder size used during training
+        device: Device to load on (gpu, tpu, cpu)
+        
+    Returns:
+        Loaded Flux model
+    """
+    import pickle
+    
+    # Get T5 dimension for context_in_dim
+    t5_dim = get_t5_dim(t5_size)
+    
+    # Create model with same architecture
+    model = load_flow_model(
+        model_name,
+        device=device,
+        from_scratch=True,
+        context_in_dim=t5_dim,
+        model_scale=model_scale,
+    )
+    
+    # Load saved state
+    with open(checkpoint_path, "rb") as f:
+        saved_state = pickle.load(f)
+    
+    # Update model with saved state
+    nnx.update(model, saved_state)
+    print(f"Loaded checkpoint from {checkpoint_path}")
+    
+    return model
+
+
+def inference(
+    checkpoint_path: str,
+    prompt: str = "a beautiful sunset over mountains",
+    # Model config (must match training)
+    model_name: str = "flux-dev",
+    model_scale: str = "small",
+    t5_size: str = "base",
+    # Generation settings
+    width: int = 256,
+    height: int = 256,
+    num_steps: int = 50,
+    guidance: float = 4.0,
+    seed: int = 42,
+    # Output
+    output_path: str = "./generated.png",
+):
+    """
+    Generate an image using a trained checkpoint.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file (e.g. "./checkpoints/checkpoint_1000_model.pkl")
+        prompt: Text prompt for image generation
+        model_name: Model config name (must match training)
+        model_scale: Model scale (must match training)
+        t5_size: T5 encoder size (must match training)
+        width: Output image width (multiple of 16)
+        height: Output image height (multiple of 16)
+        num_steps: Number of denoising steps
+        guidance: Guidance scale (only for flux-dev)
+        seed: Random seed
+        output_path: Where to save the generated image
+        
+    Example:
+        uv run python -m jflux.train inference \\
+            --checkpoint_path ./checkpoints/checkpoint_1000_model.pkl \\
+            --prompt "a cat sitting on a windowsill" \\
+            --model_scale small --t5_size base
+    """
+    # Detect device
+    devices = jax.devices()
+    device_info = devices[0]
+    device_type = device_info.platform.upper()
+    jax_device = device_type.lower()
+    torch_device = "cuda" if jax_device == "gpu" else "cpu"
+    
+    print("=" * 60)
+    print("Flux Inference")
+    print("=" * 60)
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Model scale: {model_scale}")
+    print(f"Prompt: {prompt}")
+    print(f"Size: {width}x{height}")
+    print("=" * 60)
+    
+    # Ensure dimensions are valid
+    width = 16 * (width // 16)
+    height = 16 * (height // 16)
+    
+    # Load text encoders
+    print("\nLoading text encoders...")
+    t5 = load_t5(device=torch_device, max_length=512, model_size=t5_size)
+    clip = load_clip(device=torch_device)
+    
+    # Load VAE
+    print("Loading VAE...")
+    ae = load_ae(model_name, device=jax_device)
+    
+    # Load trained model
+    print("Loading trained model...")
+    model = load_checkpoint(
+        checkpoint_path=checkpoint_path,
+        model_name=model_name,
+        model_scale=model_scale,
+        t5_size=t5_size,
+        device=jax_device,
+    )
+    
+    # Prepare inputs
+    print("\nGenerating image...")
+    key = jax.random.PRNGKey(seed)
+    
+    # Get text embeddings
+    txt = torch2jax(t5([prompt]))
+    vec = torch2jax(clip([prompt]))
+    
+    # Prepare initial noise and conditioning
+    x, img_ids, txt, txt_ids, vec = prepare(
+        t5=t5,
+        clip=clip,
+        img=get_noise(
+            num_samples=1,
+            height=height,
+            width=width,
+            dtype=jnp.bfloat16,
+            seed=seed,
+        ),
+        prompt=prompt,
+    )
+    
+    # Get timestep schedule
+    timesteps = get_schedule(
+        num_steps=num_steps,
+        image_seq_len=x.shape[1],
+        shift=(model_name != "flux-schnell"),
+    )
+    
+    # Denoise
+    use_guidance = model_name == "flux-dev"
+    x = denoise(
+        model=model,
+        img=x,
+        img_ids=img_ids,
+        txt=txt,
+        txt_ids=txt_ids,
+        vec=vec,
+        timesteps=timesteps,
+        guidance=guidance if use_guidance else None,
+    )
+    
+    # Decode to image
+    x = unpack(x, height=height, width=width)
+    x = ae.decode(x)
+    
+    # Convert to PIL and save
+    x = x[0]  # Remove batch dim
+    x = jnp.clip((x + 1.0) / 2.0, 0.0, 1.0)  # [-1,1] -> [0,1]
+    x = np.array(x)
+    x = rearrange(x, "c h w -> h w c")
+    x = (x * 255).astype(np.uint8)
+    
+    img = Image.fromarray(x)
+    img.save(output_path)
+    print(f"\nSaved to {output_path}")
+
+
 def train(
     # Dataset
     num_samples: int = 1000,
@@ -678,8 +859,11 @@ def train(
 
 
 def app():
-    """CLI entry point."""
-    Fire(train)
+    """CLI entry point with train and inference commands."""
+    Fire({
+        "train": train,
+        "inference": inference,
+    })
 
 
 if __name__ == "__main__":
